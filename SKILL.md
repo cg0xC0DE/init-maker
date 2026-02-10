@@ -33,30 +33,50 @@ Other architectures may differ in specifics but can reference this skill as a ba
 
 The script **must** execute three phases **in strict order**. No phase may be skipped.
 
-### Phase 1 — Baseline Environment Check (Blocking)
+### Phase 1 — Baseline Environment Check (Blocking, with Optional winget Auto-Install)
 
-**Goal**: Verify that the system has the bare-minimum tools needed to pull and install dependencies.
+**Goal**: Verify that the system has the bare-minimum tools needed to pull and install dependencies. When possible, offer to install missing tools automatically via `winget`.
+
+#### Pre-check: winget availability
+
+Before checking any project dependency, detect whether `winget` is available on the system:
+
+```bat
+winget --version >nul 2>&1
+```
+
+Store the result in a flag variable (e.g., `set WINGET_AVAILABLE=1` or `0`). This flag determines whether auto-install is offered later.
+
+> **winget availability**: Built-in on Windows 11 and Windows 10 2004+. Older systems may not have it — the script must gracefully handle its absence.
 
 #### What to check (derive from the project; common examples)
 
-| Tool       | Detection command          |
-|------------|----------------------------|
-| Python     | `python --version`         |
-| Node.js    | `node --version`           |
-| npm        | `npm --version`            |
-| pip        | `pip --version`            |
-| git        | `git --version`            |
+| Tool       | Detection command          | winget package ID (example)     |
+|------------|----------------------------|---------------------------------|
+| Python     | `python --version`         | `Python.Python.3.12`            |
+| Node.js    | `node --version`           | `OpenJS.NodeJS.LTS`             |
+| npm        | `npm --version`            | *(bundled with Node.js)*        |
+| pip        | `pip --version`            | *(bundled with Python)*         |
+| git        | `git --version`            | `Git.Git`                       |
 
-> Only include checks that the project actually requires. Read the project's dependency files (e.g. `requirements.txt`, `package.json`) to decide.
+> Only include checks that the project actually requires. Read the project's dependency files (e.g. `requirements.txt`, `package.json`) to decide. The winget package ID should be verified against the actual `winget search` results for accuracy.
 
 #### Behavioral rules
 
 1. Check each dependency **one at a time**, in sequence.
 2. If a dependency is **missing**:
-   - Print a clear message: `[ERROR] <tool> not detected. Please install <tool> before continuing.`
-   - **Block** with: `set /p _="After installing, press ENTER to re-check..."`
-   - After ENTER, **re-check the same dependency**.
-   - If still missing → loop back (continue blocking).
+   - Print a clear message: `[MISSING] <tool> is not detected.`
+   - **If winget is available**: ask the user whether to auto-install via winget:
+     ```
+     Would you like to install <tool> via winget? (Y/N)
+     ```
+     - User answers **Y** → run `winget install --id <PackageID> -e --accept-source-agreements --accept-package-agreements`, then **re-check**.
+     - User answers **N** → fall through to manual mode.
+   - **If winget is not available, or user answered N, or winget install failed**:
+     - Print: `[INFO] Please install <tool> manually and ensure it is in PATH.`
+     - **Block** with: `set /p _="After installing, press ENTER to re-check..."`
+     - After ENTER, **re-check the same dependency**.
+   - If still missing after re-check → loop back (continue blocking).
    - Only advance to the next check after the current one passes.
 3. After **all** checks pass, proceed to Phase 2.
 
@@ -64,19 +84,41 @@ The script **must** execute three phases **in strict order**. No phase may be sk
 
 - **Never** exit on first failure.
 - **Never** skip a check.
-- **Must** use a loop construct (`goto`-based label loop) for the retry mechanism.
+- **Never** auto-install without user confirmation — always ask Y/N first.
+- **Must** use `goto`-based label loops for the retry mechanism.
+- winget install must include `--accept-source-agreements --accept-package-agreements` to avoid interactive prompts from winget itself.
+- After a winget install, the tool may not be in the current session's PATH. If re-check still fails, remind the user to **restart the terminal** or re-run the script, then block.
 
 #### Reference implementation pattern
 
 ```bat
+:: --- winget pre-check ---
+set WINGET_AVAILABLE=0
+winget --version >nul 2>&1
+if not errorlevel 1 set WINGET_AVAILABLE=1
+
 :CHECK_PYTHON
 python --version >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python is not detected. Please install Python and ensure it is in PATH.
-    set /p _="After installing, press ENTER to re-check..."
-    goto CHECK_PYTHON
-)
-echo [OK] Python detected.
+if not errorlevel 1 goto PYTHON_OK
+
+echo "[MISSING] Python is not detected."
+if %WINGET_AVAILABLE%==0 goto PYTHON_MANUAL
+
+set /p INSTALL_CHOICE="  Install Python via winget? (Y/N): "
+if /i not "%INSTALL_CHOICE%"=="Y" goto PYTHON_MANUAL
+
+echo "[INFO] Installing Python via winget..."
+winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements
+echo "[INFO] Re-checking Python..."
+goto CHECK_PYTHON
+
+:PYTHON_MANUAL
+echo "[INFO] Please install Python manually and ensure it is in PATH."
+set /p _="  After installing, press ENTER to re-check..."
+goto CHECK_PYTHON
+
+:PYTHON_OK
+echo "[OK] Python detected."
 ```
 
 ---
@@ -293,7 +335,8 @@ echo "[SKIP] Already exists."
 
 | Mistake | Correct behavior |
 |---------|-----------------|
-| Exit immediately when a Phase 1 check fails | Block and retry in a loop |
+| Exit immediately when a Phase 1 check fails | Block and retry in a loop (offer winget first if available) |
+| Auto-install via winget without asking the user | Always ask Y/N before running winget install |
 | Ask for user input during Phase 2 | Phase 2 must be fully automated |
 | Prompt all credentials at once | One field at a time, one file at a time |
 | Rename example file before all fields are entered | Rename only after all fields are collected |
